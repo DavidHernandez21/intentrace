@@ -22,18 +22,27 @@ use nix::{
     unistd::Pid,
 };
 
-pub fn read_bytes<const N: usize>(addr: usize, pid: Pid) -> Option<[u8; N]> {
+fn read_bytes_with_count<const N: usize>(addr: usize, pid: Pid) -> Option<([u8; N], usize)> {
     let base = addr;
     let remote_iov = RemoteIoVec { base, len: N };
     // TODO!
     // large array sizes might overflow
     let mut bytes_buffer = [0u8; N];
-    process_vm_readv(
+    let bytes_read = process_vm_readv(
         pid,
         &mut [IoSliceMut::new(&mut bytes_buffer)],
         &[remote_iov],
     ).ok()?;
-    Some(bytes_buffer)
+    Some((bytes_buffer, bytes_read))
+}
+
+pub fn read_bytes<const N: usize>(addr: usize, pid: Pid) -> Option<[u8; N]> {
+    read_bytes_with_count(addr, pid).map(|(bytes, _)| bytes)
+}
+
+fn read_exact_bytes<const N: usize>(addr: usize, pid: Pid) -> Option<[u8; N]> {
+    let (bytes, bytes_read) = read_bytes_with_count(addr, pid)?;
+    (bytes_read == N).then_some(bytes)
 }
 
 pub fn read_bytes_variable_length(base: usize, pid: Pid, len: usize) -> Option<Vec<u8>> {
@@ -67,19 +76,20 @@ pub fn read_bytes_as_struct<const N: usize, T>(addr: usize, pid: Pid) -> Option<
     Some(unsafe { std::mem::transmute_copy(&vec) })
 }
 
-pub fn read_one_word(address: usize, pid: Pid) -> Option<usize> {
-    let remote_iov = RemoteIoVec {
-        base: address,
-        len: 1,
-    };
-    let mut bytes_buffer = vec![0u8; 4];
-    let _ = process_vm_readv(
-        pid,
-        &mut [IoSliceMut::new(&mut bytes_buffer)],
-        &[remote_iov],
-    )
-    .ok()?;
-    Some(unsafe { std::mem::transmute(&bytes_buffer) })
+pub fn read_i32(address: usize, pid: Pid) -> Option<i32> {
+    read_exact_bytes::<4>(address, pid).map(i32::from_ne_bytes)
+}
+
+pub fn read_usize(address: usize, pid: Pid) -> Option<usize> {
+    read_exact_bytes::<{ size_of::<usize>() }>(address, pid).map(usize::from_ne_bytes)
+}
+
+pub fn read_pipe_fds(address: usize, pid: Pid) -> Option<[i32; 2]> {
+    let [a, b, c, d, e, f, g, h] = read_exact_bytes::<8>(address, pid)?;
+    Some([
+        i32::from_ne_bytes([a, b, c, d]),
+        i32::from_ne_bytes([e, f, g, h]),
+    ])
 }
 
 pub fn read_bytes_until_null(address: usize, pid: Pid) -> Option<Vec<u8>> {
@@ -90,7 +100,7 @@ pub fn read_bytes_until_null(address: usize, pid: Pid) -> Option<Vec<u8>> {
         // change this to be similar to read_words_until_null below
         // i.e. if err: return collected data so far
         let word = ptrace::read(pid, address).ok()?;
-        let bytes: [u8; WORD_SIZE] = unsafe { std::mem::transmute(word) };
+        let bytes: [u8; WORD_SIZE] = i64::to_ne_bytes(word);
         for byte in bytes {
             if byte == b'\0' {
                 break 'read_loop;
@@ -116,7 +126,7 @@ pub fn read_words_until_null(address: usize, pid: Pid) -> Option<Vec<usize>> {
                 addr = unsafe { addr.byte_add(WORD_SIZE) };
             }
             Err(_err) => return Some(data),
-        };
+        }
     }
     Some(data)
 }
@@ -128,11 +138,10 @@ pub fn read_affinity_from_child(address: usize, pid: Pid) -> Option<Vec<usize>> 
 
     let mut vec = Vec::new();
     for cpu_number in 0..std::thread::available_parallelism()
-        .map(NonZeroUsize::get)
-        .unwrap_or(1) as usize
+        .map_or(1, NonZeroUsize::get) as usize
     {
         if unsafe { CPU_ISSET(cpu_number, &cpu_set) } {
-            vec.push(cpu_number)
+            vec.push(cpu_number);
         }
     }
     Some(vec)
@@ -151,7 +160,77 @@ pub fn write_bytes<const N: usize>(addr: usize, pid: Pid, data: [u64; N]) -> Res
                 addr = unsafe { addr.byte_add(WORD_SIZE) };
             }
             Err(_res) => return Err(()),
-        };
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_i32, read_pipe_fds, read_usize};
+    use nix::{libc, unistd::Pid};
+
+    fn own_pid() -> Pid {
+        Pid::from_raw(unsafe { libc::getpid() })
+    }
+
+    #[test]
+    fn reads_values_using_their_native_width_and_byte_order() {
+        let integer = -123_456_789_i32;
+        let word = usize::MAX - 0x1234;
+        let pipes = [17_i32, 258_i32];
+        let pid = own_pid();
+
+        assert_eq!(read_i32(&raw const integer as usize, pid), Some(integer));
+        assert_eq!(read_usize(&raw const word as usize, pid), Some(word));
+        assert_eq!(read_pipe_fds(&raw const pipes as usize, pid), Some(pipes));
+        assert_eq!(read_i32(0, pid), None);
+        assert_eq!(read_usize(0, pid), None);
+        assert_eq!(read_pipe_fds(0, pid), None);
+    }
+
+    #[test]
+    fn rejects_partial_reads_at_a_page_boundary() {
+        struct Mapping(*mut libc::c_void, usize);
+
+        impl Drop for Mapping {
+            fn drop(&mut self) {
+                unsafe { libc::munmap(self.0, self.1) };
+            }
+        }
+
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        assert!(page_size > 0);
+        let page_size = page_size as usize;
+        let length = page_size * 2;
+        let address = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(address, libc::MAP_FAILED);
+        let mapping = Mapping(address, length);
+        let value_address = unsafe { mapping.0.cast::<u8>().add(page_size - 4) };
+        unsafe {
+            value_address.copy_from_nonoverlapping(42_i32.to_ne_bytes().as_ptr(), 4);
+            assert_eq!(
+                libc::mprotect(
+                    mapping.0.cast::<u8>().add(page_size).cast(),
+                    page_size,
+                    libc::PROT_NONE,
+                ),
+                0
+            );
+        }
+
+        let pid = own_pid();
+        assert_eq!(read_i32(value_address as usize, pid), Some(42));
+        assert_eq!(read_usize(value_address as usize, pid), None);
+        assert_eq!(read_pipe_fds(value_address as usize, pid), None);
+    }
 }

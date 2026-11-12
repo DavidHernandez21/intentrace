@@ -97,14 +97,14 @@ pub fn where_in_tracee_memory(tracee_pid: Pid, address: u64) -> Option<MemoryMap
 pub fn interpret_syscall_result(return_register: u64) -> SyscallResult {
     // TODO!
     // abandon the KernelErrno check and make it manual in restartable syscalls
-    use ErrnoVariant::*;
-    use SyscallResult::*;
+    use ErrnoVariant::{Kernel, Userland};
+    use SyscallResult::{Success, Fail};
 
     // strace does something similar to this
     // https://github.com/strace/strace/blob/0f9f46096fa8da84e2e6a6646cd1e326bf7e83c7/src/negated_errno.h#L17
     // https://github.com/strace/strace/blob/0f9f46096fa8da84e2e6a6646cd1e326bf7e83c7/src/linux/x86_64/get_error.c#L26
     if return_register > MAX_KERNEL_ULONG as u64 {
-        let errno_positive = parse_as_long(return_register) * -1;
+        let errno_positive = -parse_as_long(return_register);
         let userland_errno = Errno::from_raw(errno_positive as i32);
         if matches!(userland_errno, Errno::UnknownErrno) {
             let kernel_errno = KernelErrno::from_i32(errno_positive as i32);
@@ -182,16 +182,16 @@ pub fn parse_as_signal(signum: i32) -> &'static str {
 }
 
 pub fn parse_as_int(register: u64) -> i32 {
-    unsafe { std::mem::transmute::<u32, i32>(lower_32_bits(register)) }
+    u32::cast_signed(lower_32_bits(register))
 }
 
 pub fn parse_as_long(register: u64) -> i64 {
-    unsafe { std::mem::transmute::<u64, i64>(register) }
+    u64::cast_signed(register)
 }
 
 #[inline(always)]
 pub fn parse_as_ssize_t(register: usize) -> isize {
-    unsafe { std::mem::transmute::<usize, isize>(register) }
+    usize::cast_signed(register)
 }
 
 pub fn lower_32_bits(value: u64) -> u32 {
@@ -199,13 +199,13 @@ pub fn lower_32_bits(value: u64) -> u32 {
 }
 
 pub fn lower_64_bits(value: usize) -> u64 {
-    (value & 0xFFFFFFFFFFFFFFFF) as u64
+    value as u64
 }
 
 // Length_Of_Bytes_Specific
 // memory and file indexers and seekers where negative is expected
 pub fn parse_as_signed_bytes(register_value: u64) -> String {
-    let bytes = unsafe { std::mem::transmute::<u64, i64>(register_value) };
+    let bytes = u64::cast_signed(register_value);
     // TODO!
     // phrasing should be checked for lseek and offsets in mmap
     format!("{bytes} Bytes")
@@ -240,7 +240,7 @@ pub fn string_from_pointer(address: usize, tracee_pid: Pid) -> String {
     // multi-threaded execve fails here for some reason
     match read_bytes_until_null(address, tracee_pid) {
         Some(data) => String::from_utf8_lossy(&data).into_owned(),
-        None => "".to_owned(),
+        None => String::new(),
     }
 }
 
@@ -292,12 +292,14 @@ pub fn partition_by_final_dentry(graphemes: Graphemes) -> (String, String) {
 // lose_relativity_on_path requires book keeping
 // for now just print the path
 //
-pub fn get_strings_from_dirfd_anchored_file<'previous_function>(
+pub fn get_strings_from_dirfd_anchored_file(
     dirfd: i32,
-    filename: &'previous_function str,
+    filename: &str,
     tracee_pid: Pid,
-) -> anyhow::Result<(Cow<'static, str>, &'previous_function str)> {
-    if !filename.starts_with('/') {
+) -> anyhow::Result<(Cow<'static, str>, &str)> {
+    if filename.starts_with('/') {
+        Ok((Cow::Borrowed(""), filename))
+    } else {
         let mut tracees = TRACEES.lock().unwrap();
         let tracee_process = tracees
             .entry(tracee_pid)
@@ -307,11 +309,7 @@ pub fn get_strings_from_dirfd_anchored_file<'previous_function>(
             let current_working_directory = tracee_process.cwd()?;
 
             // remove this check when lose_relativity_on_path starts accounting for path math
-            let repetition_dependent = if filename.starts_with("./") {
-                &filename[2..]
-            } else {
-                filename.as_ref()
-            };
+            let repetition_dependent = filename.strip_prefix("./").unwrap_or(filename);
             // let repetition_dependent = lose_relativity_on_path(filename.as_ref());
             Ok((
                 Cow::Owned(current_working_directory.to_string_lossy().into_owned()),
@@ -322,11 +320,7 @@ pub fn get_strings_from_dirfd_anchored_file<'previous_function>(
             match file_info.target {
                 procfs::process::FDTarget::Path(first_partition) => {
                     // remove this check when lose_relativity_on_path starts accounting for path math
-                    let repetition_dependent = if filename.starts_with("./") {
-                        &filename[2..]
-                    } else {
-                        filename.as_ref()
-                    };
+                    let repetition_dependent = filename.strip_prefix("./").unwrap_or(filename);
                     // let repetition_dependent = lose_relativity_on_path(filename.as_ref());
                     Ok((
                         Cow::Owned(first_partition.to_string_lossy().into_owned()),
@@ -336,8 +330,6 @@ pub fn get_strings_from_dirfd_anchored_file<'previous_function>(
                 _ => unreachable!(),
             }
         }
-    } else {
-        Ok((Cow::Borrowed(""), filename))
     }
 }
 
@@ -377,50 +369,44 @@ pub fn parse_as_file_descriptor(file_descriptor: i32, tracee_pid: Pid) -> String
                         if let Some(matching_socket) =
                             tcp.into_iter().find(|entry| entry.inode == socket_number)
                         {
-                            match matching_socket.remote_address.ip().is_loopback() {
-                                true => colored_strings.push(
-                                    format!(
-                                        "{} -> localhost:{}",
-                                        file.fd,
-                                        matching_socket.remote_address.port()
-                                    )
-                                    .bright_blue(),
-                                ),
-                                false => colored_strings.push(
-                                    format!(
-                                        "{} -> {}:{}",
-                                        file.fd,
-                                        matching_socket.remote_address.ip().to_string(),
-                                        matching_socket.remote_address.port()
-                                    )
-                                    .bright_blue(),
-                                ),
-                            };
+                            if matching_socket.remote_address.ip().is_loopback() { colored_strings.push(
+                                format!(
+                                    "{} -> localhost:{}",
+                                    file.fd,
+                                    matching_socket.remote_address.port()
+                                )
+                                .bright_blue(),
+                            ); } else { colored_strings.push(
+                                format!(
+                                    "{} -> {}:{}",
+                                    file.fd,
+                                    matching_socket.remote_address.ip(),
+                                    matching_socket.remote_address.port()
+                                )
+                                .bright_blue(),
+                            ); }
                             break 'lookup;
                         }
                         if_chain! {
                             if let Ok(entries) = net::tcp6();
                             if let Some(matching_socket) = entries.into_iter().find(|entry| entry.inode == socket_number);
                             then {
-                                match matching_socket.remote_address.ip().is_loopback() {
-                                    true => colored_strings.push(
-                                        format!(
-                                            "{} -> localhost:{}",
-                                            file.fd,
-                                            matching_socket.remote_address.port()
-                                        )
-                                        .bright_blue(),
-                                    ),
-                                    false => colored_strings.push(
-                                        format!(
-                                            "{} -> {}:{}",
-                                            file.fd,
-                                            matching_socket.remote_address.ip().to_string(),
-                                            matching_socket.remote_address.port()
-                                        )
-                                        .bright_blue(),
-                                    ),
-                                };
+                                if matching_socket.remote_address.ip().is_loopback() { colored_strings.push(
+                                    format!(
+                                        "{} -> localhost:{}",
+                                        file.fd,
+                                        matching_socket.remote_address.port()
+                                    )
+                                    .bright_blue(),
+                                ); } else { colored_strings.push(
+                                    format!(
+                                        "{} -> {}:{}",
+                                        file.fd,
+                                        matching_socket.remote_address.ip(),
+                                        matching_socket.remote_address.port()
+                                    )
+                                    .bright_blue(),
+                                ); }
                                 break 'lookup;
                             }
                         }
@@ -481,6 +467,11 @@ pub fn parse_as_file_descriptor(file_descriptor: i32, tracee_pid: Pid) -> String
                 }
                 FDTarget::Other(target, _inode_number) => {
                     return format!("{} -> {target}", file.fd).bright_blue().to_string()
+                }
+                FDTarget::Unknown(fd_type, details) => {
+                    return format!("{} -> Unknown({fd_type}, {details})", file.fd)
+                        .bright_blue()
+                        .to_string()
                 }
             },
             Err(_e) => return "ignored".to_owned(),

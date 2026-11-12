@@ -61,40 +61,40 @@ impl Display for Category {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Category::CPU => {
-                write!(f, "CPU",)
+                write!(f, "CPU")
             }
             Category::Memory => {
-                write!(f, "Memory",)
+                write!(f, "Memory")
             }
             Category::DiskIO => {
-                write!(f, "Disk",)
+                write!(f, "Disk")
             }
             Category::FileOp => {
-                write!(f, "Disk",)
+                write!(f, "Disk")
             }
             Category::Device => {
-                write!(f, "Device",)
+                write!(f, "Device")
             }
             Category::Process => {
-                write!(f, "Process",)
+                write!(f, "Process")
             }
             Category::AsyncIO => {
-                write!(f, "AsyncIO",)
+                write!(f, "AsyncIO")
             }
             Category::Signals => {
-                write!(f, "Signals",)
+                write!(f, "Signals")
             }
             Category::Network => {
-                write!(f, "Network",)
+                write!(f, "Network")
             }
             Category::Thread => {
-                write!(f, "Thread",)
+                write!(f, "Thread")
             }
             Category::System => {
-                write!(f, "System",)
+                write!(f, "System")
             }
             Category::Security => {
-                write!(f, "Security",)
+                write!(f, "Security")
             }
         }
     }
@@ -114,16 +114,16 @@ impl Display for Bytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Bytes::norm(bytes) => {
-                write!(f, "{:.1} Bytes", bytes)
+                write!(f, "{bytes:.1} Bytes")
             }
             Bytes::kilo(bytes) => {
-                write!(f, "{:.1} KiB", bytes)
+                write!(f, "{bytes:.1} KiB")
             }
             Bytes::mega(bytes) => {
-                write!(f, "{:.1} MiB", bytes)
+                write!(f, "{bytes:.1} MiB")
             }
             Bytes::giga(bytes) => {
-                write!(f, "{:.1} GiB", bytes)
+                write!(f, "{bytes:.1} GiB")
             }
         }
     }
@@ -160,20 +160,20 @@ impl BytesPagesRelevant {
 
 impl Display for BytesPagesRelevant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use Bytes::*;
-        use BytesPagesRelevant::*;
+        use Bytes::{norm, kilo, mega, giga};
+        use BytesPagesRelevant::{PagesCeil, PagesFloor};
         match self {
             PagesCeil(bytes) => match *bytes {
                 norm(bytes) => {
                     let pages = format!("{} Pages", f64::ceil(bytes as f64 / *PAGE_SIZE as f64))
                         .custom_color(*PAGES_COLOR);
-                    write!(f, "{:.1} Bytes ({})", bytes, pages)
+                    write!(f, "{bytes:.1} Bytes ({pages})")
                 }
                 kilo(bytes) => {
                     let pages =
                         format!("{} Pages", f64::ceil((bytes * 1024.0) / *PAGE_SIZE as f64))
                             .custom_color(*PAGES_COLOR);
-                    write!(f, "{:.1} KiB ({})", bytes, pages)
+                    write!(f, "{bytes:.1} KiB ({pages})")
                 }
                 mega(bytes) => {
                     let pages = format!(
@@ -181,7 +181,7 @@ impl Display for BytesPagesRelevant {
                         f64::ceil((bytes * 1_048_576.0) / *PAGE_SIZE as f64)
                     )
                     .custom_color(*PAGES_COLOR);
-                    write!(f, "{:.1} MiB ({})", bytes, pages)
+                    write!(f, "{bytes:.1} MiB ({pages})")
                 }
                 giga(bytes) => {
                     let pages = format!(
@@ -189,7 +189,7 @@ impl Display for BytesPagesRelevant {
                         f64::ceil((bytes * 1_073_741_824.0) / *PAGE_SIZE as f64)
                     )
                     .custom_color(*PAGES_COLOR);
-                    write!(f, "{:.1} GiB ({})", bytes, pages)
+                    write!(f, "{bytes:.1} GiB ({pages})")
                 }
             },
             PagesFloor(bytes) => match *bytes {
@@ -197,14 +197,14 @@ impl Display for BytesPagesRelevant {
                     let pages = format!("{} Pages", f64::floor(bytes as f64 / *PAGE_SIZE as f64))
                         .custom_color(*PAGES_COLOR);
 
-                    write!(f, "{:.1} Bytes ({})", bytes, pages)
+                    write!(f, "{bytes:.1} Bytes ({pages})")
                 }
                 kilo(bytes) => {
                     let pages =
                         format!("{} Pages", f64::floor((bytes * 1024.0) / *PAGE_SIZE as f64))
                             .custom_color(*PAGES_COLOR);
 
-                    write!(f, "{:.1} KiB ({})", bytes, pages)
+                    write!(f, "{bytes:.1} KiB ({pages})")
                 }
                 mega(bytes) => {
                     let pages = format!(
@@ -213,7 +213,7 @@ impl Display for BytesPagesRelevant {
                     )
                     .custom_color(*PAGES_COLOR);
 
-                    write!(f, "{:.1} MiB ({})", bytes, pages)
+                    write!(f, "{bytes:.1} MiB ({pages})")
                 }
                 giga(bytes) => {
                     let pages = format!(
@@ -222,7 +222,7 @@ impl Display for BytesPagesRelevant {
                     )
                     .custom_color(*PAGES_COLOR);
 
-                    write!(f, "{:.1} GiB ({})", bytes, pages)
+                    write!(f, "{bytes:.1} GiB ({pages})")
                 }
             },
         }

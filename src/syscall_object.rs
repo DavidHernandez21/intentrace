@@ -74,7 +74,7 @@ impl Default for SyscallObject {
 
 impl SyscallObject {
     pub fn fill_buffer(&mut self) {
-        if let Ok(_) = self.one_line_formatter() {
+        if let Ok(()) = self.one_line_formatter() {
             // let mut string = String::new();
             // for string_portion in &mut self.one_line {
             //     string.push_str(&format!("{}", string_portion));
@@ -118,11 +118,11 @@ impl SyscallObject {
         let bytes_amount = register_value as usize;
         let mut bytes = Bytes::norm(bytes_amount);
         if bytes_amount as f64 / 1_000_000_000.0 > 1.0 {
-            bytes = Bytes::giga(bytes_amount as f64 / 1_000_000_000.0)
+            bytes = Bytes::giga(bytes_amount as f64 / 1_000_000_000.0);
         } else if bytes_amount as f64 / 1_000_000.0 > 1.0 {
-            bytes = Bytes::mega(bytes_amount as f64 / 1_000_000.0)
+            bytes = Bytes::mega(bytes_amount as f64 / 1_000_000.0);
         } else if bytes_amount as f64 / 1_000.0 > 1.0 {
-            bytes = Bytes::kilo(bytes_amount as f64 / 1_000.0)
+            bytes = Bytes::kilo(bytes_amount as f64 / 1_000.0);
         }
         bytes.to_string()
     }
@@ -131,11 +131,11 @@ impl SyscallObject {
         let bytes_amount = register_value as usize;
         let mut bytes = Bytes::norm(bytes_amount);
         if bytes_amount / 1_000_000_000 > 1 {
-            bytes = Bytes::giga(bytes_amount as f64 / 1_000_000_000.0)
+            bytes = Bytes::giga(bytes_amount as f64 / 1_000_000_000.0);
         } else if bytes_amount / 1_000_000 > 1 {
-            bytes = Bytes::mega(bytes_amount as f64 / 1_000_000.0)
+            bytes = Bytes::mega(bytes_amount as f64 / 1_000_000.0);
         } else if bytes_amount / 1_000 > 1 {
-            bytes = Bytes::kilo(bytes_amount as f64 / 1_000.0)
+            bytes = Bytes::kilo(bytes_amount as f64 / 1_000.0);
         }
         bytes.to_string()
     }

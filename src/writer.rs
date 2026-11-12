@@ -30,18 +30,14 @@ pub fn initialize_writer() {
     colored::control::set_override(true);
 
     let sink: Box<dyn Write + Send> = if let Some(output) = *OUTPUT_FILE {
-        match std::fs::File::options()
+        if let Ok(file) = std::fs::File::options()
             .append(false)
             .write(true)
             .create(true)
             .truncate(true)
-            .open(output)
-        {
-            Ok(file) => Box::new(file),
-            Err(_) => {
-                eprintln!("Could not open or create file: {}", output.display());
-                std::process::exit(100);
-            }
+            .open(output) { Box::new(file) } else {
+            eprintln!("Could not open or create file: {}", output.display());
+            std::process::exit(100);
         }
     } else {
         Box::new(std::io::stderr())
@@ -81,7 +77,7 @@ pub fn flush_buffer() {
     let mut buffer = BUFFER.lock().unwrap();
     let mut writer = WRITER.get().unwrap().lock().unwrap();
     for colored_text in buffer.iter_mut() {
-        write!(writer, "{}", colored_text).unwrap();
+        write!(writer, "{colored_text}").unwrap();
     }
     writer.flush().unwrap();
 }
@@ -106,7 +102,7 @@ pub fn write_syscall_not_covered(sysno: Sysno, tracee_pid: Pid) {
 
 
 pub fn write_colored(filename: String) {
-    buffered_write(filename.normal())
+    buffered_write(filename.normal());
 }
 
 // repetition isnt relevant for the first partition of the path
@@ -119,10 +115,10 @@ pub fn write_partition_1_consider_repetition(partition1: &str) {
 #[inline(always)]
 pub fn write_partition_2_consider_repetition(partition2: &str) {
     // don't alternate if we're operating on a directory
-    let partition_2_color = if partition2.len() != 0 {
-        get_final_dentry_color_consider_repetition(partition2)
-    } else {
+    let partition_2_color = if partition2.is_empty() {
         PARTITION_2_COLOR[*PATHLIKE_ALTERNATOR.lock().unwrap()]
+    } else {
+        get_final_dentry_color_consider_repetition(partition2)
     };
     buffered_write(partition2.custom_color(partition_2_color));
 }
@@ -312,11 +308,11 @@ pub fn write_signed_numeric(signed_numeric: impl PrimInt + Signed) {
         -2147483648 => write_text("i32::MIN".custom_color(CustomColor::new(0, 169, 233))),
         -2147483649 => write_text("i32::MIN - 1".custom_color(CustomColor::new(0, 169, 233))),
         -9223372036854775807 => {
-            write_text("i64::MIN + 1".custom_color(CustomColor::new(0, 169, 233)))
+            write_text("i64::MIN + 1".custom_color(CustomColor::new(0, 169, 233)));
         }
         -9223372036854775808 => write_text("i64::MIN".custom_color(CustomColor::new(0, 169, 233))),
         n => write_text(n.to_string().custom_color(CustomColor::new(0, 169, 233))),
-    };
+    }
 }
 
 // TODO!
@@ -336,14 +332,14 @@ pub fn write_unsigned_numeric(unsigned_numeric: impl PrimInt + Unsigned) {
         4294967295 => write_text("u32::MAX".custom_color(CustomColor::new(0, 169, 233))),
         4294967296 => write_text("u32::MAX + 1".custom_color(CustomColor::new(0, 169, 233))),
         9223372036854775806 => {
-            write_text("i64::MAX - 1".custom_color(CustomColor::new(0, 169, 233)))
+            write_text("i64::MAX - 1".custom_color(CustomColor::new(0, 169, 233)));
         }
         9223372036854775807 => write_text("i64::MAX".custom_color(CustomColor::new(0, 169, 233))),
         9223372036854775808 => {
-            write_text("i64::MAX + 1".custom_color(CustomColor::new(0, 169, 233)))
+            write_text("i64::MAX + 1".custom_color(CustomColor::new(0, 169, 233)));
         }
         18446744073709551614 => {
-            write_text("u64::MAX - 1".custom_color(CustomColor::new(0, 169, 233)))
+            write_text("u64::MAX - 1".custom_color(CustomColor::new(0, 169, 233)));
         }
         18446744073709551615 => write_text("u64::MAX".custom_color(CustomColor::new(0, 169, 233))),
         n => write_text(n.to_string().custom_color(CustomColor::new(0, 169, 233))),
@@ -354,9 +350,9 @@ pub fn write_unsigned_numeric(unsigned_numeric: impl PrimInt + Unsigned) {
 pub fn write_address(register_value: usize) {
     let pointer = register_value as *const ();
     if pointer.is_null() {
-        write_text("NULL".custom_color(*OUR_YELLOW))
+        write_text("NULL".custom_color(*OUR_YELLOW));
     } else {
-        write_text(format!("{pointer:p}").custom_color(*OUR_YELLOW))
+        write_text(format!("{pointer:p}").custom_color(*OUR_YELLOW));
     }
 }
 
@@ -364,7 +360,7 @@ pub fn write_address(register_value: usize) {
 pub fn write_page_aligned_address(register_value: usize) {
     let pointer = register_value as *const ();
     if pointer.is_null() {
-        write_text("NULL".custom_color(*OUR_YELLOW))
+        write_text("NULL".custom_color(*OUR_YELLOW));
     } else {
         // the pipe notation can only be used for 4KiB & 64KiB page sizes
         // 16KiB is a common page size but its equivalent to 250 in decimal
@@ -373,7 +369,7 @@ pub fn write_page_aligned_address(register_value: usize) {
             4096 => {
                 let len = pointer_formatted.len();
                 write_text(pointer_formatted[..(len - 3)].custom_color(*OUR_YELLOW));
-                if register_value % 4096 == 0 {
+                if register_value.is_multiple_of(4096) {
                     write_text("|".custom_color(*PAGES_COLOR));
                 } else {
                     write_text("|".red());
@@ -383,7 +379,7 @@ pub fn write_page_aligned_address(register_value: usize) {
             65536 => {
                 let len = pointer_formatted.len();
                 write_text(pointer_formatted[..(len - 4)].custom_color(*OUR_YELLOW));
-                if register_value % 65536 == 0 {
+                if register_value.is_multiple_of(65536) {
                     write_text("|".custom_color(*PAGES_COLOR));
                 } else {
                     write_text("|".red());
@@ -393,7 +389,7 @@ pub fn write_page_aligned_address(register_value: usize) {
             16384 => {
                 let len = pointer_formatted.len();
                 write_text(pointer_formatted[..(len - 5)].custom_color(*OUR_YELLOW));
-                if register_value % 16384 == 0 {
+                if register_value.is_multiple_of(16384) {
                     write_text(
                         pointer_formatted[(len - 5)..(len - 4)]
                             .custom_color(*PAGES_COLOR)
@@ -421,7 +417,7 @@ pub fn write_futex(futex_address: usize) {
 
 pub fn write_exiting(process_pid: Pid) {
     let exited = " EXITED ".on_custom_color(*EXITED_BACKGROUND_COLOR);
-    let pid = format!(" {} ", process_pid).on_custom_color(*PID_BACKGROUND_COLOR);
+    let pid = format!(" {process_pid} ").on_custom_color(*PID_BACKGROUND_COLOR);
     write_text("\n\n ".white());
     write_text(pid);
     write_text(exited);

@@ -13,7 +13,8 @@ use crate::{
     cli::{FAILED_ONLY, FOLLOW_FORKS},
     colors::{CONTINUED_COLOR, OUR_YELLOW, PAGES_COLOR, PID_NUMBER_COLOR},
     peeker_poker::{
-        read_affinity_from_child, read_bytes_as_struct, read_one_word, read_string_specific_length,
+        read_affinity_from_child, read_bytes_as_struct, read_i32, read_pipe_fds,
+        read_string_specific_length, read_usize,
     },
     return_resolvers::Readers_Writers,
     syscall_object::{ErrnoVariant, SyscallObject, SyscallResult},
@@ -21,7 +22,7 @@ use crate::{
     utilities::{
         colorize_syscall_name, find_fd_for_tracee, get_array_of_strings, get_groupname_from_uid,
         get_mem_difference_from_previous, get_strings_from_dirfd_anchored_file,
-        get_username_from_uid, lower_32_bits, lower_64_bits, new_process, new_thread,
+        get_username_from_uid, lower_32_bits, new_process, new_thread,
         parse_as_bytes_no_pages_ceil, parse_as_bytes_pages_ceil, parse_as_file_descriptor,
         parse_as_int, parse_as_long, parse_as_signal, parse_as_signed_bytes, parse_as_ssize_t,
         parse_as_unsigned_bytes, partition_by_final_dentry, string_from_pointer, REGISTERS,
@@ -46,7 +47,7 @@ use nix::{
         clone_args, rlimit, sigaction, timespec, timeval, AT_EACCESS, AT_EMPTY_PATH, AT_FDCWD,
         AT_NO_AUTOMOUNT, AT_REMOVEDIR, AT_STATX_DONT_SYNC, AT_STATX_FORCE_SYNC,
         AT_STATX_SYNC_AS_STAT, AT_SYMLINK_FOLLOW, AT_SYMLINK_NOFOLLOW, CLONE_CHILD_CLEARTID,
-        CLONE_CHILD_SETTID, CLONE_CLEAR_SIGHAND, CLONE_FILES, CLONE_FS, CLONE_IO, CLONE_NEWCGROUP,
+        CLONE_CHILD_SETTID, CLONE_FILES, CLONE_FS, CLONE_IO, CLONE_NEWCGROUP,
         CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER, CLONE_NEWUTS,
         CLONE_PARENT, CLONE_PARENT_SETTID, CLONE_PIDFD, CLONE_PTRACE, CLONE_SETTLS, CLONE_SIGHAND,
         CLONE_SYSVSEM, CLONE_THREAD, CLONE_UNTRACED, CLONE_VFORK, CLONE_VM, EFD_CLOEXEC,
@@ -90,6 +91,9 @@ use nix::{
 use syscalls::Sysno;
 use unicode_segmentation::UnicodeSegmentation;
 
+// libc currently defines this clone3 flag with an overflowing i32 type.
+const CLONE_CLEAR_SIGHAND: u64 = 0x1_0000_0000;
+
 impl SyscallObject {
     pub(crate) fn one_line_error(&self) {
         // TODO! Deprecate this logic for more granularity
@@ -103,7 +107,7 @@ impl SyscallObject {
         }
     }
     pub(crate) fn write_pid_sysname(&mut self) {
-        use crate::syscall_object::SyscallState::*;
+        use crate::syscall_object::SyscallState::{Entering, Exiting};
 
         if *FOLLOW_FORKS {
             // multi-threaded: pid always blue
@@ -160,7 +164,7 @@ impl SyscallObject {
     }
 
     pub(crate) fn one_line_formatter(&mut self) -> anyhow::Result<()> {
-        use crate::syscall_object::SyscallState::*;
+        use crate::syscall_object::SyscallState::{Entering, Exiting};
         self.write_pid_sysname();
 
         //
@@ -696,7 +700,22 @@ impl SyscallObject {
                         let filename = string_from_pointer(registers[0] as usize, self.tracee_pid);
                         // ==================================================================
                         // https://github.com/torvalds/linux/blob/cfb2e2c57aef75a414c0f18445c7441df5bc13be/fs/open.c#L768C1-L768C2
-                        if owner_given != u32::MAX {
+                        if owner_given == u32::MAX {
+                            if group_given == u32::MAX {
+                                // TODO!
+                                // change this
+                                write_general_text(
+                                    "[intentrace: redundant syscall (won't do anything)]",
+                                );
+                            } else {
+                                let group = get_groupname_from_uid(group_given)
+                                    .unwrap_or("[intentrace: could not read group]");
+                                write_general_text("change the group of the file: ");
+                                write_vanilla_path_file(&filename);
+                                write_general_text("to ");
+                                write_text(group.bold().green());
+                            }
+                        } else {
                             let owner = get_username_from_uid(owner_given)
                                 .unwrap_or("[intentrace: could not read owner]");
                             write_general_text("change the owner of ");
@@ -709,21 +728,6 @@ impl SyscallObject {
                                 write_general_text(", and its group to ");
                                 write_text(group.bold().green());
                             }
-                        } else {
-                            if group_given != u32::MAX {
-                                let group = get_groupname_from_uid(group_given)
-                                    .unwrap_or("[intentrace: could not read group]");
-                                write_general_text("change the group of the file: ");
-                                write_vanilla_path_file(&filename);
-                                write_general_text("to ");
-                                write_text(group.bold().green());
-                            } else {
-                                // TODO!
-                                // change this
-                                write_general_text(
-                                    "[intentrace: redundant syscall (won't do anything)]",
-                                );
-                            }
                         }
                     }
                     Exiting => match &self.result {
@@ -731,18 +735,18 @@ impl SyscallObject {
                             write_general_text(" |=> ");
                             // TODO!
                             // unnecessary details, consider removing
-                            if owner_given != u32::MAX {
+                            if owner_given == u32::MAX {
+                                if group_given == u32::MAX {
+                                    write_text("successful".bold().green());
+                                } else {
+                                    write_text("group changed".bold().green());
+                                }
+                            } else {
                                 write_text("ownership".bold().green());
                                 if group_given != u32::MAX {
                                     write_text(" and group".bold().green());
                                 }
                                 write_text(" changed".bold().green());
-                            } else {
-                                if group_given != u32::MAX {
-                                    write_text("group changed".bold().green());
-                                } else {
-                                    write_text("successful".bold().green());
-                                }
                             }
                         }
                         SyscallResult::Fail(_errno_variant) => {
@@ -762,7 +766,22 @@ impl SyscallObject {
                             parse_as_file_descriptor(parse_as_int(registers[0]), self.tracee_pid);
                         // ==================================================================
                         // https://github.com/torvalds/linux/blob/cfb2e2c57aef75a414c0f18445c7441df5bc13be/fs/open.c#L768C1-L768C2
-                        if owner_given != u32::MAX {
+                        if owner_given == u32::MAX {
+                            if group_given == u32::MAX {
+                                // TODO!
+                                // change this
+                                write_general_text(
+                                    "[intentrace: redundant syscall (won't do anything)]",
+                                );
+                            } else {
+                                let group = get_groupname_from_uid(group_given)
+                                    .unwrap_or("[intentrace: could not read group]");
+                                write_general_text("change the group of the file: ");
+                                write_colored(filename);
+                                write_general_text("to ");
+                                write_text(group.bold().green());
+                            }
+                        } else {
                             let owner = get_username_from_uid(owner_given)
                                 .unwrap_or("[intentrace: could not read owner]");
                             write_general_text("change the owner of ");
@@ -775,21 +794,6 @@ impl SyscallObject {
                                 write_general_text(", and its group to ");
                                 write_text(group.bold().green());
                             }
-                        } else {
-                            if group_given != u32::MAX {
-                                let group = get_groupname_from_uid(group_given)
-                                    .unwrap_or("[intentrace: could not read group]");
-                                write_general_text("change the group of the file: ");
-                                write_colored(filename);
-                                write_general_text("to ");
-                                write_text(group.bold().green());
-                            } else {
-                                // TODO!
-                                // change this
-                                write_general_text(
-                                    "[intentrace: redundant syscall (won't do anything)]",
-                                );
-                            }
                         }
                     }
                     Exiting => match &self.result {
@@ -797,18 +801,18 @@ impl SyscallObject {
                             write_general_text(" |=> ");
                             // TODO!
                             // unnecessary details, consider removing
-                            if owner_given != u32::MAX {
+                            if owner_given == u32::MAX {
+                                if group_given == u32::MAX {
+                                    write_text("successful".bold().green());
+                                } else {
+                                    write_text("group changed".bold().green());
+                                }
+                            } else {
                                 write_text("ownership".bold().green());
                                 if group_given != u32::MAX {
                                     write_text(" and group".bold().green());
                                 }
                                 write_text(" changed".bold().green());
-                            } else {
-                                if group_given != u32::MAX {
-                                    write_text("group changed".bold().green());
-                                } else {
-                                    write_text("successful".bold().green());
-                                }
                             }
                         }
                         SyscallResult::Fail(_errno_variant) => {
@@ -827,7 +831,27 @@ impl SyscallObject {
                         let filename = string_from_pointer(registers[0] as usize, self.tracee_pid);
                         // ==================================================================
                         // https://github.com/torvalds/linux/blob/cfb2e2c57aef75a414c0f18445c7441df5bc13be/fs/open.c#L768C1-L768C2
-                        if owner_given != u32::MAX {
+                        if owner_given == u32::MAX {
+                            if group_given == u32::MAX {
+                                // TODO!
+                                // change this
+                                write_general_text(
+                                    "[intentrace: redundant syscall (won't do anything)]",
+                                );
+                            } else {
+                                let group = get_groupname_from_uid(group_given)
+                                    .unwrap_or("[intentrace: could not read group]");
+                                write_general_text("change the group of the file: ");
+                                write_vanilla_path_file(&filename);
+                                write_general_text("to ");
+                                write_text(group.bold().green());
+                                write_general_text(" (");
+                                write_text(
+                                    "don't recurse symbolic links".custom_color(*OUR_YELLOW),
+                                );
+                                write_general_text(")");
+                            }
+                        } else {
                             let owner = get_username_from_uid(owner_given)
                                 .unwrap_or("[intentrace: could not read owner]");
                             write_general_text("change the owner of ");
@@ -843,26 +867,6 @@ impl SyscallObject {
                             write_general_text(" (");
                             write_text("don't recurse symbolic links".custom_color(*OUR_YELLOW));
                             write_general_text(")");
-                        } else {
-                            if group_given != u32::MAX {
-                                let group = get_groupname_from_uid(group_given)
-                                    .unwrap_or("[intentrace: could not read group]");
-                                write_general_text("change the group of the file: ");
-                                write_vanilla_path_file(&filename);
-                                write_general_text("to ");
-                                write_text(group.bold().green());
-                                write_general_text(" (");
-                                write_text(
-                                    "don't recurse symbolic links".custom_color(*OUR_YELLOW),
-                                );
-                                write_general_text(")");
-                            } else {
-                                // TODO!
-                                // change this
-                                write_general_text(
-                                    "[intentrace: redundant syscall (won't do anything)]",
-                                );
-                            }
                         }
                     }
                     Exiting => match &self.result {
@@ -870,18 +874,18 @@ impl SyscallObject {
                             write_general_text(" |=> ");
                             // TODO!
                             // unnecessary details, consider removing
-                            if owner_given != u32::MAX {
+                            if owner_given == u32::MAX {
+                                if group_given == u32::MAX {
+                                    write_text("successful".bold().green());
+                                } else {
+                                    write_text("group changed".bold().green());
+                                }
+                            } else {
                                 write_text("ownership".bold().green());
                                 if group_given != u32::MAX {
                                     write_text(" and group".bold().green());
                                 }
                                 write_text(" changed".bold().green());
-                            } else {
-                                if group_given != u32::MAX {
-                                    write_text("group changed".bold().green());
-                                } else {
-                                    write_text("successful".bold().green());
-                                }
                             }
                         }
                         SyscallResult::Fail(_errno_variant) => {
@@ -917,7 +921,23 @@ impl SyscallObject {
                             }
                             write_directives(flag_directive);
                         };
-                        if owner_given != u32::MAX {
+                        if owner_given == u32::MAX {
+                            if group_given == u32::MAX {
+                                let group = get_groupname_from_uid(group_given)
+                                    .unwrap_or("[intentrace: could not read group]");
+                                write_general_text("change the group of the file: ");
+                                write_vanilla_path_file(&filename);
+                                write_general_text("to ");
+                                write_text(group.bold().green());
+                                flags_check();
+                            } else {
+                                // TODO!
+                                // change this
+                                write_general_text(
+                                    "[intentrace: redundant syscall (won't do anything)]",
+                                );
+                            }
+                        } else {
                             let owner = get_username_from_uid(owner_given)
                                 .unwrap_or("[intentrace: could not read owner]");
                             write_general_text("change the owner of ");
@@ -935,22 +955,6 @@ impl SyscallObject {
                                 write_text(group.bold().green());
                             }
                             flags_check();
-                        } else {
-                            if group_given == u32::MAX {
-                                let group = get_groupname_from_uid(group_given)
-                                    .unwrap_or("[intentrace: could not read group]");
-                                write_general_text("change the group of the file: ");
-                                write_vanilla_path_file(&filename);
-                                write_general_text("to ");
-                                write_text(group.bold().green());
-                                flags_check();
-                            } else {
-                                // TODO!
-                                // change this
-                                write_general_text(
-                                    "[intentrace: redundant syscall (won't do anything)]",
-                                );
-                            }
                         }
                     }
                     Exiting => match &self.result {
@@ -958,18 +962,18 @@ impl SyscallObject {
                             write_general_text(" |=> ");
                             // TODO!
                             // unnecessary details, consider removing
-                            if owner_given != u32::MAX {
+                            if owner_given == u32::MAX {
+                                if group_given == u32::MAX {
+                                    write_text("successful".bold().green());
+                                } else {
+                                    write_text("group changed".bold().green());
+                                }
+                            } else {
                                 write_text("ownership".bold().green());
                                 if group_given != u32::MAX {
                                     write_text(" and group".bold().green());
                                 }
                                 write_text(" changed".bold().green());
-                            } else {
-                                if group_given != u32::MAX {
-                                    write_text("group changed".bold().green());
-                                } else {
-                                    write_text("successful".bold().green());
-                                }
                             }
                         }
                         SyscallResult::Fail(_errno_variant) => {
@@ -1030,7 +1034,7 @@ impl SyscallObject {
                                 }
 
                                 write_text(", new program break: ".bold().green());
-                                write_address(new_brk as usize)
+                                write_address(new_brk as usize);
                             }
                         }
                         SyscallResult::Fail(_errno_variant) => {
@@ -1071,10 +1075,10 @@ impl SyscallObject {
                         let offset_num = parse_as_long(registers[5]);
                         let offset = parse_as_signed_bytes(registers[5]);
                         // ==================================================================
-                        if !anonymous {
-                            write_general_text("map ");
-                        } else {
+                        if anonymous {
                             write_general_text("allocate ");
+                        } else {
+                            write_general_text("map ");
                         }
                         write_text(bytes.custom_color(*OUR_YELLOW));
                         // BACKED BY FILE
@@ -1173,7 +1177,7 @@ impl SyscallObject {
                                 "use Direct Access (DAX) for file writes".custom_color(*OUR_YELLOW),
                             );
                         }
-                        if others.len() > 0 {
+                        if !others.is_empty() {
                             write_general_text(" (");
                             write_commas(others);
                             write_general_text(")");
@@ -1599,13 +1603,13 @@ impl SyscallObject {
                             write_general_text("allow ");
                             let mut flags = vec![];
                             if (prot_flags & PROT_READ) == PROT_READ {
-                                flags.push("reading".custom_color(*OUR_YELLOW))
+                                flags.push("reading".custom_color(*OUR_YELLOW));
                             }
                             if (prot_flags & PROT_WRITE) == PROT_WRITE {
-                                flags.push("writing".custom_color(*OUR_YELLOW))
+                                flags.push("writing".custom_color(*OUR_YELLOW));
                             }
                             if (prot_flags & PROT_EXEC) == PROT_EXEC {
-                                flags.push("execution".custom_color(*OUR_YELLOW))
+                                flags.push("execution".custom_color(*OUR_YELLOW));
                             }
                             write_commas(flags);
                         }
@@ -2354,36 +2358,7 @@ impl SyscallObject {
                         match &self.result {
                             &SyscallResult::Success(_syscall_return) => {
                                 write_general_text(" |=> ");
-                                match read_one_word(registers[0] as usize, self.tracee_pid) {
-                                    Some(pipe_fds) => {
-                                        write_text("created the pipe".bold().green());
-                                        // TODO!
-                                        // this errors with NotFound
-                                        // commented for now
-                                        //
-                                        // write_text("created the pipe: ".bold().green());
-                                        // let pipes: [i32; 2] = unsafe {
-                                        //     std::mem::transmute::<usize, [i32; 2]>(pipe_fds)
-                                        // };
-                                        // write_text("read end: ".custom_color(*OUR_YELLOW));
-                                        // write_text(
-                                        //     parse_as_file_descriptor(
-                                        //         pipes[0] as u64,
-                                        //         self.tracee_pid,
-                                        //     )
-                                        //     .custom_color(*PAGES_COLOR),
-                                        // );
-                                        // write_text(", write end: ".custom_color(*OUR_YELLOW));
-                                        // write_text(
-                                        //     parse_as_file_descriptor(
-                                        //         pipes[1] as u64,
-                                        //         self.tracee_pid,
-                                        //     )
-                                        //     .custom_color(*PAGES_COLOR),
-                                        // );
-                                    }
-                                    None => write_text("created the pipe".bold().green()),
-                                }
+                                write_text("created the pipe".bold().green());
                             }
                             // TODO! granular
                             SyscallResult::Fail(_errno_variant) => {
@@ -2406,12 +2381,9 @@ impl SyscallObject {
                         match &self.result {
                             &SyscallResult::Success(_syscall_return) => {
                                 write_general_text(" |=> ");
-                                match read_one_word(registers[0] as usize, self.tracee_pid) {
-                                    Some(pipe_fds) => {
+                                match read_pipe_fds(registers[0] as usize, self.tracee_pid) {
+                                    Some(pipes) => {
                                         write_text("created the pipe: ".bold().green());
-                                        let pipes: [i32; 2] = unsafe {
-                                            std::mem::transmute::<usize, [i32; 2]>(pipe_fds)
-                                        };
                                         write_text("read end: ".custom_color(*OUR_YELLOW));
                                         write_text(
                                             parse_as_file_descriptor(pipes[0], self.tracee_pid)
@@ -2423,7 +2395,14 @@ impl SyscallObject {
                                                 .custom_color(*PAGES_COLOR),
                                         );
                                     }
-                                    None => write_text("created the pipe".bold().green()),
+                                    None => {
+                                        write_text("created the pipe ".bold().green());
+                                        write_text(
+                                            "[intentrace: could not read pipe descriptors]"
+                                                .blink()
+                                                .bright_black(),
+                                        );
+                                    }
                                 }
                             }
                             // TODO! granular
@@ -2988,7 +2967,7 @@ impl SyscallObject {
                                                 .bright_black(),
                                         );
                                     }
-                                };
+                                }
                             }
                             // TODO! granular
                             SyscallResult::Fail(_errno_variant) => {
@@ -3045,7 +3024,7 @@ impl SyscallObject {
                                 ) {
                                     Some(target) => write_vanilla_path_file(&target),
                                     None => todo!(),
-                                };
+                                }
                             }
                             // TODO! granular
                             SyscallResult::Fail(_errno_variant) => {
@@ -3565,7 +3544,7 @@ impl SyscallObject {
                         let mut directives = vec![];
                         if (flags & RENAME_EXCHANGE) == RENAME_EXCHANGE {
                             directives
-                                .push("exchange the paths atomically".custom_color(*OUR_YELLOW))
+                                .push("exchange the paths atomically".custom_color(*OUR_YELLOW));
                         }
                         if (flags & RENAME_NOREPLACE) == RENAME_NOREPLACE {
                             directives
@@ -4355,7 +4334,7 @@ impl SyscallObject {
                         // maxevents must be greater than zero
                         let max_events = parse_as_int(registers[2]);
                         // timespec
-                        let timeout = parse_as_int(registers[3]);
+                        let timeout = registers[3];
                         let signal_mask = registers[4];
                         // ==================================================================
                         write_general_text("block until a maximum of ");
@@ -4462,7 +4441,7 @@ impl SyscallObject {
                         let operation = registers[1];
                         // ==================================================================
                         write_general_text("perform operation ");
-                        write_text(format!("#{}", operation).custom_color(*PAGES_COLOR));
+                        write_text(format!("#{operation}").custom_color(*PAGES_COLOR));
                         write_general_text(" on the device: ");
                         write_colored(filename);
                     }
@@ -4507,7 +4486,7 @@ impl SyscallObject {
                         let operation = parse_as_int(registers[1]);
                         // ==================================================================
                         write_general_text("perform operation ");
-                        write_text(format!("#{}", operation).custom_color(*OUR_YELLOW));
+                        write_text(format!("#{operation}").custom_color(*OUR_YELLOW));
                         write_general_text(" on the file: ");
                         write_colored(filename);
                     }
@@ -4594,11 +4573,11 @@ impl SyscallObject {
                                     || (operation & ARCH_GET_GS) == ARCH_GET_GS
                                 {
                                     let parsed_register =
-                                        match read_one_word(address as usize, self.tracee_pid) {
-                                            Some(word) => lower_64_bits(word)
+                                        match read_usize(address as usize, self.tracee_pid) {
+                                            Some(word) => word
                                                 .to_string()
                                                 .custom_color(*PAGES_COLOR),
-                                            None => "[intentrace: could not read pid]"
+                                            None => "[intentrace: could not read register]"
                                                 .blink()
                                                 .bright_black(),
                                         };
@@ -4695,7 +4674,15 @@ impl SyscallObject {
                         // second is NULL: query current signal handler
                         // third is non-NULL: previous action is saved in oldact.
                         // second and third is NULL: check whether a given signal is valid for the current machine
-                        if !signal_action.is_null() {
+                        if signal_action.is_null() {
+                            if old_signal_action.is_null() {
+                                write_general_text("check if the current machine supports: ");
+                                write_text(signal_as_string.custom_color(*OUR_YELLOW));
+                            } else {
+                                write_general_text("retrieve the current signal handler for ");
+                                write_text(signal_as_string.custom_color(*PAGES_COLOR));
+                            }
+                        } else {
                             match read_bytes_as_struct::<SIGACTION_SIZE, sigaction>(
                                 registers[1] as usize,
                                 self.tracee_pid as _,
@@ -4727,7 +4714,7 @@ impl SyscallObject {
                                         "[intentrace: could not read sigaction]".bright_black(),
                                     );
                                 }
-                            };
+                            }
                             if !old_signal_action.is_null() {
                                 write_general_text(", and retrieve the current signal handler");
                             }
@@ -4736,14 +4723,6 @@ impl SyscallObject {
                             // granularity on sigaction.sa_flags
                             //
                             //
-                        } else {
-                            if !old_signal_action.is_null() {
-                                write_general_text("retrieve the current signal handler for ");
-                                write_text(signal_as_string.custom_color(*PAGES_COLOR));
-                            } else {
-                                write_general_text("check if the current machine supports: ");
-                                write_text(signal_as_string.custom_color(*OUR_YELLOW));
-                            }
                         }
                     }
                     Exiting => {
@@ -4932,7 +4911,7 @@ impl SyscallObject {
                         // TODO!
                         // check latrer
                         // rt_sigreturn is interruptible while testing on some linux software
-                        self.one_line_error()
+                        self.one_line_error();
                     }
                 },
             },
@@ -7299,7 +7278,10 @@ impl SyscallObject {
                         let cpus = read_affinity_from_child(registers[2] as usize, self.tracee_pid)
                             .unwrap();
                         // ==================================================================
-                        if !cpus.is_empty() {
+                        if cpus.is_empty() {
+                            // to make it error if it happens
+                            unreachable!()
+                        } else {
                             write_general_text("restrict ");
                             if thread_id == 0 {
                                 write_text("the calling thread".custom_color(*OUR_YELLOW));
@@ -7315,11 +7297,8 @@ impl SyscallObject {
                             );
                             for cpu in cpu_iter {
                                 write_text(", ".custom_color(*OUR_YELLOW));
-                                write_text(format!("[CPU {}]", cpu).custom_color(*PAGES_COLOR));
+                                write_text(format!("[CPU {cpu}]").custom_color(*PAGES_COLOR));
                             }
-                        } else {
-                            // to make it error if it happens
-                            unreachable!()
                         }
                     }
                     Exiting => {
@@ -7373,7 +7352,7 @@ impl SyscallObject {
                                     for cpu in cpu_iter {
                                         write_text(", ".bold().green());
                                         write_text(
-                                            format!("[CPU {}]", cpu).custom_color(*PAGES_COLOR),
+                                            format!("[CPU {cpu}]").custom_color(*PAGES_COLOR),
                                         );
                                     }
                                 }
@@ -8152,7 +8131,7 @@ impl SyscallObject {
                                         write_unsigned_numeric(val);
                                         write_general_text(" waiters on it");
                                     }
-                                };
+                                }
                                 match timespec_or_val2 {
                                     1 => {
                                         write_general_text(",  and requeue ");
@@ -8167,7 +8146,7 @@ impl SyscallObject {
                                         write_unsigned_numeric(val);
                                         write_general_text(" remaining waiters");
                                     }
-                                };
+                                }
                                 write_general_text(" to the futex at ");
                                 write_futex(uaddr2_address);
                             }
@@ -8184,7 +8163,7 @@ impl SyscallObject {
                                         write_unsigned_numeric(val);
                                         write_general_text(" waiters waiting ");
                                     }
-                                };
+                                }
                                 write_general_text("on futex: ");
                                 write_futex(uaddr_address);
                                 match timespec_or_val2 {
@@ -8201,7 +8180,7 @@ impl SyscallObject {
                                         write_unsigned_numeric(val);
                                         write_general_text(" remaining waiters");
                                     }
-                                };
+                                }
                                 write_general_text(" to the futex at ");
                                 write_futex(uaddr2_address);
                             }
@@ -8225,7 +8204,7 @@ impl SyscallObject {
                                         write_unsigned_numeric(val);
                                         write_general_text(" waiters");
                                     }
-                                };
+                                }
                                 write_general_text(" on futex: ");
                                 write_futex(uaddr_address);
                                 write_text(
@@ -8330,8 +8309,8 @@ impl SyscallObject {
                                 write_general_text(" |=> ");
                                 write_text("list retrieved with length ".bold().green());
                                 let parsed_length =
-                                    match read_one_word(len_ptr as usize, self.tracee_pid) {
-                                        Some(word) => lower_64_bits(word)
+                                    match read_usize(len_ptr as usize, self.tracee_pid) {
+                                        Some(word) => word
                                             .to_string()
                                             .custom_color(*PAGES_COLOR),
                                         None => "[intentrace: could not read robust list length]"
@@ -8386,8 +8365,8 @@ impl SyscallObject {
                         write_text("clear_child_tid".custom_color(*PAGES_COLOR));
                         write_general_text(" for the calling thread to ");
                         let thread_id =
-                            match read_one_word(thread_address as usize, self.tracee_pid) {
-                                Some(word) => parse_as_int(lower_64_bits(word))
+                            match read_i32(thread_address as usize, self.tracee_pid) {
+                                Some(word) => word
                                     .to_string()
                                     .custom_color(*PAGES_COLOR),
                                 None => "[intentrace: could not read thread_id]"
@@ -8694,9 +8673,8 @@ impl SyscallObject {
                                 if wstatus_address == 0 {
                                     write_text("successful".bold().green());
                                 } else {
-                                    match read_one_word(wstatus_address as usize, self.tracee_pid) {
-                                        Some(word) => {
-                                            let wstatus = parse_as_int(word as u64);
+                                    match read_i32(wstatus_address as usize, self.tracee_pid) {
+                                        Some(wstatus) => {
                                             // TODO! this is a workaround because nix's waitstatus resolver errors with EINVAL very often
                                             if nix::libc::WIFEXITED(wstatus) {
                                                 let status = nix::libc::WEXITSTATUS(wstatus);
@@ -8800,7 +8778,7 @@ impl SyscallObject {
                                                 .blink()
                                                 .bright_black(),
                                         ),
-                                    };
+                                    }
                                 }
                             }
                             SyscallResult::Fail(_errno_variant) => {
@@ -9008,7 +8986,7 @@ impl SyscallObject {
                                             .custom_color(*OUR_YELLOW),
                                     );
                                 }
-                                if flags == CLONE_CLEAR_SIGHAND {
+                                if cl_args.flags & CLONE_CLEAR_SIGHAND != 0 {
                                     directives.push(
                                         "default all inherited signal handlers"
                                             .custom_color(*OUR_YELLOW),
@@ -9035,7 +9013,7 @@ impl SyscallObject {
                                             .normal(),
                                         ),
                                     }
-                                };
+                                }
                                 write_directives(directives);
                             }
                             None => {
@@ -9110,7 +9088,7 @@ impl SyscallObject {
                         // ==================================================================
                         if (flags & CLONE_VM) == CLONE_VM {
                             write_general_text("spawn a new thread at stack address ");
-                            write_text(format!("0x{:x}", stack).custom_color(*OUR_YELLOW));
+                            write_text(format!("0x{stack:x}").custom_color(*OUR_YELLOW));
                             // directives.push("run in the same memory space".custom_color(*OUR_YELLOW));
                         } else {
                             write_general_text("spawn a new child process");
@@ -9266,11 +9244,6 @@ impl SyscallObject {
                                 "store the child TID in child's memory".custom_color(*OUR_YELLOW),
                             );
                         }
-                        if flags == CLONE_CLEAR_SIGHAND {
-                            directives.push(
-                                "default all inherited signal handlers".custom_color(*OUR_YELLOW),
-                            );
-                        }
                         // TODO!
                         // separate the signal parsing from the to_str() result
                         if exit_signal == 0 {
@@ -9290,8 +9263,8 @@ impl SyscallObject {
                                     .normal(),
                                 ),
                             }
-                        };
-                        write_directives(directives)
+                        }
+                        write_directives(directives);
                     }
                     Exiting => {
                         match &self.result {

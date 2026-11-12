@@ -7,7 +7,7 @@ pub mod constants {
         pub const RLIMIT_SIZE: usize = size_of::<nix::libc::rlimit>();
     }
     pub mod general {
-        pub const MAX_KERNEL_ULONG: usize = unsafe { std::mem::transmute::<isize, usize>(-4095) };
+        pub const MAX_KERNEL_ULONG: usize = isize::cast_unsigned(-4095);
         // syscall: arch_prctl
         pub const ARCH_SET_GS: i32 = 0x1001;
         pub const ARCH_SET_FS: i32 = 0x1002;

@@ -4,7 +4,7 @@ use syscalls::Sysno;
 // TODO!
 // revise and compare with strace's system
 pub fn initialize_categories_map() -> HashMap<Sysno, Category> {
-    use Category::*;
+    use Category::{DiskIO, FileOp, Device, Memory, AsyncIO, Network, Process, Signals, System, Security};
     let array: Vec<(Sysno, Category)> = vec![
         (Sysno::read, DiskIO),
         (Sysno::write, DiskIO),

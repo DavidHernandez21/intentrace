@@ -5,7 +5,7 @@ use syscalls::Sysno;
 
 // TODO! switch to phf later
 pub fn initialize_skeletons_map() -> HashMap<Sysno, Syscall_Shape> {
-    use SysReturn::*;
+    use SysReturn::{Length_Of_Bytes_Specific_Or_Errno, Address_Or_MAP_FAILED_Errno, File_Descriptor_Or_Errno, Numeric_Or_Errno, Address_Or_Errno_getcwd, Does_Not_Return_Anything, Address_Or_Errno, Never_Returns, Signal_Or_Errno, Always_Errors, Always_Successful_Numeric, Ptrace_Diverse_Or_Errno, Always_Successful_User_Group, Priority_Or_Errno};
     let array: Vec<(Sysno, Syscall_Shape)> = vec![
         // read from a file descriptor
         (
